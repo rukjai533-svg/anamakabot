@@ -21,8 +21,8 @@ import json, os, datetime, threading, time, re
 # ══════════════════════════════════════════════════
 #   ⚙️  CONFIG
 # ══════════════════════════════════════════════════
-BOT_TOKEN        = "YOUR_BOT_TOKEN_HERE"    # @BotFather se
-VOUCH_CHANNEL    = "@YourVouchChannel"      # Vouch channel @username ya -100xxx
+BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")  # @BotFather se
+VOUCH_CHANNEL    = "@anamakatest"      # Vouch channel @username ya -100xxx
 INR_FEE_PCT      = 5                        # INR deals: 5%
 CRYPTO_FEE_PCT   = 3                        # Crypto deals: 3%
 DEAL_PREFIX      = "ET"                     # #ET000001
