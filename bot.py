@@ -1,4 +1,3 @@
-Content is user-generated and unverified.
 """
 ESCROW BOT v5 — Final Production
 Changes from v4:
