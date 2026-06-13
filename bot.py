@@ -1,10 +1,9 @@
 """
-ESCROW BOT v5 — Final Production
-Changes from v4:
-  - /deal /received /complete /cancel = admins only
-  - All messages in English
-  - /kickall = direct, no confirmation button
-  - /stats removed (separate bot)
+ESCROW BOT v6
+Changes:
+  - No tutorial/instructions after /deal confirm message
+  - /kickall fixed: only kicks users currently IN the group
+  - /escrowstats: monthly escrow leaderboard
 """
 
 import telebot
@@ -12,10 +11,8 @@ from telebot import types
 import json, os, datetime, threading, time, re
 
 # ══════════════════════════════════════════════════
-#   CONFIG
-# ══════════════════════════════════════════════════
 BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")
-VOUCH_CHANNEL    = os.environ.get("VOUCH_CHANNEL", "@anamakatest")
+VOUCH_CHANNEL    = os.environ.get("VOUCH_CHANNEL", "@YourVouchChannel")
 INR_FEE_PCT      = 5
 CRYPTO_FEE_PCT   = 3
 DEAL_PREFIX      = "ET"
@@ -36,12 +33,19 @@ def is_admin(chat_id, user_id):
     except:
         return False
 
+def is_in_group(chat_id, user_id):
+    """Check if user is currently a member of the group"""
+    try:
+        member = bot.get_chat_member(chat_id, user_id)
+        return member.status in ("member", "administrator", "creator", "restricted")
+    except:
+        return False
+
 # ──────────────────────────────────────────────────
 #  CURRENCY DETECTION
 # ──────────────────────────────────────────────────
 
 CRYPTO_KEYWORDS = {"usdt","usdc","btc","eth","bnb","trx","sol","ltc","xrp","crypto","usd","$"}
-INR_KEYWORDS    = {"inr","₹","upi","rupee","rupees","rs","imps","neft","paytm","gpay","phonepe"}
 
 def detect_currency(amount_str, payment_mode_str):
     combined = (amount_str + " " + payment_mode_str).lower()
@@ -133,8 +137,7 @@ def _parse_deal_id(raw):
 
 def parse_form(text):
     result = {}
-    lines  = text.strip().split("\n")
-    for line in lines:
+    for line in text.strip().split("\n"):
         line = line.strip()
         if not line or line.startswith("🔒") or line.startswith("•"):
             continue
@@ -157,7 +160,7 @@ def parse_form(text):
             clean = re.sub(r"[₹$€£\s/]", " ", val)
             match = re.search(r"[\d,]+\.?\d*", clean)
             if match:
-                num = match.group(0).replace(",", "").strip()
+                num = match.group(0).replace(",","").strip()
                 try:
                     result["amount"] = float(num)
                 except:
@@ -165,9 +168,8 @@ def parse_form(text):
         elif "payment" in low or "mode" in low:
             result["payment_mode"] = val
 
-    amount_raw   = result.get("amount_raw", "")
-    payment_mode = result.get("payment_mode", "")
-    ctype, csym, fpct = detect_currency(amount_raw, payment_mode)
+    ctype, csym, fpct = detect_currency(
+        result.get("amount_raw",""), result.get("payment_mode",""))
     result["currency_type"] = ctype
     result["currency_sym"]  = csym
     result["fee_pct"]       = fpct
@@ -219,7 +221,7 @@ def cmd_deal(message):
 
     form_text = message.reply_to_message.text or ""
     if "buyer" not in form_text.lower() or "seller" not in form_text.lower():
-        bot.reply_to(message, "❌ This does not look like a valid form. Please reply on a properly filled form.")
+        bot.reply_to(message, "❌ This does not look like a valid form.")
         return
 
     form    = parse_form(form_text)
@@ -227,13 +229,12 @@ def cmd_deal(message):
                if not form.get(f)]
     if missing:
         bot.reply_to(message,
-            "❌ These fields are missing or empty in the form:\n" +
+            "❌ These fields are missing:\n" +
             "\n".join(f"  • {m}" for m in missing))
         return
 
     data    = load()
     deal_id = next_id(data)
-
     amount  = form["amount"]
     csym    = form["currency_sym"]
     ctype   = form["currency_type"]
@@ -262,6 +263,7 @@ def cmd_deal(message):
         "created_at":       datetime.datetime.now().isoformat(),
     }
 
+    # ── Deal card — NO instructions at bottom ──
     card = (
         f"🆔 DEAL ID: #{deal_id}\n\n"
         f"👤 Buyer: @{form['buyer']}\n"
@@ -274,7 +276,7 @@ def cmd_deal(message):
         f"💵 Total Payable: {csym}{fmt(total)}\n\n"
         f"🔐 Escrower: @{escrow_uname}\n\n"
         f"📋 Please review and confirm the deal.\n"
-        f"Deal will be cancelled automatically in 15 minutes if not confirmed."
+        f"Auto-cancels in 15 minutes if not confirmed."
     )
 
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -315,10 +317,9 @@ def handle_confirm(call):
 
     state = pending[deal_id]
 
-    # Cancel — only escrow/admin
     if prefix == "cx_":
         if caller_id != state["escrow_id"] and not is_admin(call.message.chat.id, caller_id):
-            bot.answer_callback_query(call.id, "❌ Only the escrow can cancel this deal.", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ Only the escrow can cancel.", show_alert=True)
             return
         del pending[deal_id]
         try:
@@ -328,28 +329,26 @@ def handle_confirm(call):
         bot.answer_callback_query(call.id, "Cancelled.")
         return
 
-    # Seller confirm
     if prefix == "cs_":
         if caller_u != state["seller"].lower():
             bot.answer_callback_query(call.id,
-                f"❌ Only seller @{state['seller']} can confirm this.", show_alert=True)
+                f"❌ Only seller @{state['seller']} can confirm.", show_alert=True)
             return
         if state["confirmed_seller"]:
-            bot.answer_callback_query(call.id, "You have already confirmed.")
+            bot.answer_callback_query(call.id, "Already confirmed.")
             return
         state["confirmed_seller"] = True
         bot.answer_callback_query(call.id, "✅ Seller confirmed!")
         bot.send_message(call.message.chat.id,
             f"✅ Seller @{state['seller']} has confirmed the deal for #{deal_id}.")
 
-    # Buyer confirm
     elif prefix == "cb_":
         if caller_u != state["buyer"].lower():
             bot.answer_callback_query(call.id,
-                f"❌ Only buyer @{state['buyer']} can confirm this.", show_alert=True)
+                f"❌ Only buyer @{state['buyer']} can confirm.", show_alert=True)
             return
         if state["confirmed_buyer"]:
-            bot.answer_callback_query(call.id, "You have already confirmed.")
+            bot.answer_callback_query(call.id, "Already confirmed.")
             return
         state["confirmed_buyer"] = True
         bot.answer_callback_query(call.id, "✅ Buyer confirmed!")
@@ -367,12 +366,10 @@ def _update_buttons(chat_id, msg_id, state, deal_id):
     markup.add(
         types.InlineKeyboardButton(
             "Seller ✅ Confirmed" if state["confirmed_seller"] else "Seller Confirm ✅",
-            callback_data=f"cs_{deal_id}"
-        ),
+            callback_data=f"cs_{deal_id}"),
         types.InlineKeyboardButton(
             "Buyer ✅ Confirmed"  if state["confirmed_buyer"]  else "Buyer Confirm ✅",
-            callback_data=f"cb_{deal_id}"
-        )
+            callback_data=f"cb_{deal_id}")
     )
     if not (state["confirmed_buyer"] and state["confirmed_seller"]):
         markup.add(types.InlineKeyboardButton("❌ Cancel Deal", callback_data=f"cx_{deal_id}"))
@@ -420,6 +417,7 @@ def _activate_deal(chat_id, msg_id, deal_id, state):
     total = state["total"]
     fpct  = state["fee_pct"]
 
+    # ── Both confirmed message — NO tutorial/instructions ──
     msg = (
         f"🆔 DEAL ID: #{deal_id}\n"
         f"👤 Buyer: @{state['buyer']}\n"
@@ -431,9 +429,7 @@ def _activate_deal(chat_id, msg_id, deal_id, state):
         f"💰 Deal Amount:  {csym}{fmt(amt)}\n"
         f"💸 Escrow Fee:   {csym}{fmt(fee)} ({fpct}%)\n"
         f"💵 Total to Pay: {csym}{fmt(total)}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Buyer must send {csym}{fmt(total)} to escrow.\n"
-        f"Once payment is received, escrow runs: /received {deal_id}"
+        f"━━━━━━━━━━━━━━━━━━━━"
     )
     bot.send_message(chat_id, msg)
 
@@ -462,12 +458,11 @@ def cmd_received(message):
         return
 
     deal = data["deals"][deal_id]
-
     if caller != deal["escrow"].lower():
-        bot.reply_to(message, f"❌ Only escrow @{deal['escrow']} can mark this as received.")
+        bot.reply_to(message, f"❌ Only escrow @{deal['escrow']} can mark this.")
         return
     if deal.get("received"):
-        bot.reply_to(message, f"⚠️ Deal #{deal_id} is already marked as received.")
+        bot.reply_to(message, f"⚠️ Deal #{deal_id} already marked as received.")
         return
 
     amount  = deal["amount"]
@@ -481,7 +476,7 @@ def cmd_received(message):
     deal["received_at"] = datetime.datetime.now().isoformat()
     save(data)
 
-    text = (
+    bot.send_message(message.chat.id,
         f"💰 Received Amount: {csym}{fmt(total)}\n"
         f"💸 Release/Refund Amount: {csym}{fmt(amount)}\n"
         f"🧳 Escrow Fee: {csym}{fmt(fee)} ({fee_pct}%)\n"
@@ -489,10 +484,8 @@ def cmd_received(message):
         f"➡️ Continue the Deal\n"
         f"👤 Buyer: @{deal['buyer']}\n"
         f"👤 Seller: @{deal['seller']}\n"
-        f"🔐 Escrower: @{deal['escrow']}\n\n"
-        f"Once deal is complete, run:\n/complete {deal_id}"
+        f"🔐 Escrower: @{deal['escrow']}"
     )
-    bot.send_message(message.chat.id, text)
 
 # ──────────────────────────────────────────────────
 #  /complete — ADMINS ONLY
@@ -519,9 +512,8 @@ def cmd_complete(message):
         return
 
     deal = data["deals"][deal_id]
-
     if caller != deal["escrow"].lower():
-        bot.reply_to(message, f"❌ Only escrow @{deal['escrow']} can complete this deal.")
+        bot.reply_to(message, f"❌ Only escrow @{deal['escrow']} can complete this.")
         return
     if not deal.get("received"):
         bot.reply_to(message, f"⚠️ Please run /received {deal_id} first.")
@@ -546,7 +538,6 @@ def cmd_complete(message):
             u["highest_deal"]    = max(u.get("highest_deal",0), amount)
 
     save(data)
-
     date_str = datetime.datetime.now().strftime("%d %b %Y")
 
     bot.send_message(message.chat.id,
@@ -573,7 +564,7 @@ def cmd_complete(message):
         bot.send_message(VOUCH_CHANNEL, vouch)
     except Exception as e:
         bot.send_message(message.chat.id,
-            f"⚠️ Could not post to vouch channel: {e}\nMake sure bot is admin in the vouch channel.")
+            f"⚠️ Could not post to vouch channel: {e}")
 
 # ──────────────────────────────────────────────────
 #  /cancel — ADMINS ONLY
@@ -595,10 +586,6 @@ def cmd_cancel(message):
     deal_id = _parse_deal_id(parts[1])
 
     if deal_id in pending:
-        if message.from_user.id != pending[deal_id]["escrow_id"] and \
-           not is_admin(message.chat.id, message.from_user.id):
-            bot.reply_to(message, "❌ Only escrow can cancel this deal.")
-            return
         del pending[deal_id]
         bot.send_message(message.chat.id, f"❌ Deal #{deal_id} has been cancelled.")
         return
@@ -610,7 +597,7 @@ def cmd_cancel(message):
 
     deal = data["deals"][deal_id]
     if caller != deal["escrow"].lower():
-        bot.reply_to(message, f"❌ Only escrow @{deal['escrow']} can cancel this deal.")
+        bot.reply_to(message, f"❌ Only escrow @{deal['escrow']} can cancel.")
         return
     if deal.get("completed"):
         bot.reply_to(message, "❌ A completed deal cannot be cancelled.")
@@ -631,7 +618,7 @@ def cmd_cancel(message):
     )
 
 # ──────────────────────────────────────────────────
-#  /kickall — ADMINS ONLY, direct (no confirmation)
+#  /kickall — FIXED: only kicks users IN group right now
 # ──────────────────────────────────────────────────
 
 @bot.message_handler(commands=["kickall"])
@@ -659,19 +646,26 @@ def cmd_kickall(message):
     except:
         admin_ids = {message.from_user.id}
 
-    kicked, protected_list, admin_list = [], [], []
+    kicked, protected_list, not_in_group = [], [], []
 
     for uid_key, u in data["users"].items():
         uid_int = u.get("user_id", 0)
         uname   = u.get("username","")
+
         if not isinstance(uid_int, int) or uid_int == 0:
             continue
         if uid_int in admin_ids:
-            admin_list.append(f"@{uname}")
             continue
+
+        # ── KEY FIX: check if user is actually IN the group right now ──
+        if not is_in_group(message.chat.id, uid_int):
+            not_in_group.append(uname)
+            continue
+
         if uname.lower() in protected:
             protected_list.append(f"@{uname}")
             continue
+
         try:
             bot.ban_chat_member(message.chat.id, uid_int)
             bot.unban_chat_member(message.chat.id, uid_int)
@@ -687,7 +681,6 @@ def cmd_kickall(message):
     result = (
         f"✅ Kick Operation Completed!\n\n"
         f"👥 Total Group Members: {total}\n"
-        f"👑 Admins/Owners (Protected): {len(admin_list)}\n"
         f"🦵 Users Kicked: {len(kicked)}\n"
         f"🔒 Users with Active Deals (Protected): {len(protected_list)}\n"
     )
@@ -699,6 +692,84 @@ def cmd_kickall(message):
     result += "\n\nℹ️ Kicked users can rejoin using the group invite link."
 
     bot.send_message(message.chat.id, result)
+
+# ──────────────────────────────────────────────────
+#  /escrowstats — Monthly Escrow Leaderboard
+# ──────────────────────────────────────────────────
+
+@bot.message_handler(commands=["escrowstats"])
+def cmd_escrowstats(message):
+    data = load()
+    now  = datetime.datetime.now()
+
+    # Current month range
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_name  = now.strftime("%B %Y")
+
+    # Build escrow leaderboard from completed deals this month
+    escrow_stats = {}  # username → {deals, volume, highest}
+
+    for did, deal in data["deals"].items():
+        if not deal.get("completed"):
+            continue
+
+        # Check if completed this month
+        completed_at = deal.get("completed_at","")
+        try:
+            dt = datetime.datetime.fromisoformat(completed_at)
+            if dt < month_start:
+                continue
+        except:
+            continue
+
+        escrow = deal.get("escrow","").lower()
+        if not escrow:
+            continue
+
+        amount = deal.get("amount", 0)
+        csym   = deal.get("currency_sym", "₹")
+
+        if escrow not in escrow_stats:
+            escrow_stats[escrow] = {
+                "username": deal.get("escrow",""),
+                "deals":    0,
+                "volume":   0.0,
+                "highest":  0.0,
+                "currency": csym
+            }
+
+        escrow_stats[escrow]["deals"]   += 1
+        escrow_stats[escrow]["volume"]  = round(escrow_stats[escrow]["volume"] + amount, 2)
+        escrow_stats[escrow]["highest"] = max(escrow_stats[escrow]["highest"], amount)
+
+    if not escrow_stats:
+        bot.reply_to(message,
+            f"📊 Escrow Leaderboard — {month_name}\n\n"
+            f"No completed deals this month yet.")
+        return
+
+    # Sort by deals done (primary), volume (secondary)
+    ranked = sorted(escrow_stats.values(),
+                    key=lambda x: (x["deals"], x["volume"]), reverse=True)
+
+    medals = ["🥇","🥈","🥉"]
+    text   = f"🏆 Escrow Leaderboard — {month_name}\n"
+    text  += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    for i, e in enumerate(ranked, 1):
+        medal = medals[i-1] if i <= 3 else f"#{i}"
+        csym  = e["currency"]
+        text += (
+            f"{medal} @{e['username']}\n"
+            f"   📦 Deals: {e['deals']}\n"
+            f"   💰 Volume: {csym}{fmt(e['volume'])}\n"
+            f"   ⚡ Highest: {csym}{fmt(e['highest'])}\n\n"
+        )
+
+    text += "━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"📅 Stats for {month_name}"
+
+    bot.reply_to(message, text)
 
 # ──────────────────────────────────────────────────
 #  /mydeal
@@ -733,16 +804,16 @@ def cmd_help(message):
     bot.send_message(message.chat.id,
         "🤖 Escrow Bot — Commands\n"
         "─────────────────────────\n"
-        "/form           → Get blank form template\n"
-        "/deal           → Reply on form to create deal (Admin only)\n"
-        "/received [ID]  → Mark payment received (Admin only)\n"
-        "/complete [ID]  → Complete deal + auto vouch (Admin only)\n"
-        "/cancel [ID]    → Cancel a deal (Admin only)\n"
-        "/mydeal         → View your active deals\n"
-        "/kickall        → Kick inactive users (Admin only)\n"
+        "/form              → Get blank form template\n"
+        "/deal              → Reply on form to create deal (Admin)\n"
+        "/received [ID]     → Mark payment received (Admin)\n"
+        "/complete [ID]     → Complete deal + auto vouch (Admin)\n"
+        "/cancel [ID]       → Cancel a deal (Admin)\n"
+        "/mydeal            → View your active deals\n"
+        "/kickall           → Kick inactive users (Admin)\n"
+        "/escrowstats       → Monthly escrow leaderboard\n"
         "─────────────────────────\n"
-        f"💸 INR Fee: {INR_FEE_PCT}%  |  Crypto Fee: {CRYPTO_FEE_PCT}%\n"
-        "Currency is auto-detected from the form."
+        f"💸 INR Fee: {INR_FEE_PCT}%  |  Crypto Fee: {CRYPTO_FEE_PCT}%"
     )
 
 # ──────────────────────────────────────────────────
@@ -759,7 +830,7 @@ def track(message):
     if uid_key not in data["users"]:
         ensure_user(data, uname, message.from_user.id)
         save(data)
-    elif data["users"].get(uid_key, {}).get("username") != uname:
+    elif data["users"].get(uid_key,{}).get("username") != uname:
         if uid_key in data["users"]:
             data["users"][uid_key]["username"] = uname
             save(data)
@@ -768,5 +839,5 @@ def track(message):
 #  RUN
 # ──────────────────────────────────────────────────
 
-print(f"🤖 Escrow Bot v5 | INR: {INR_FEE_PCT}% | Crypto: {CRYPTO_FEE_PCT}%")
+print(f"🤖 Escrow Bot v6 | INR: {INR_FEE_PCT}% | Crypto: {CRYPTO_FEE_PCT}%")
 bot.infinity_polling(timeout=60, long_polling_timeout=60)
