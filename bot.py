@@ -12,7 +12,7 @@ import json, os, datetime, threading, time, re
 
 # ══════════════════════════════════════════════════
 BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")
-VOUCH_CHANNEL    = os.environ.get("VOUCH_CHANNEL", "@YourVouchChannel")
+VOUCH_CHANNEL    = os.environ.get("VOUCH_CHANNEL", "@anamakatest")
 INR_FEE_PCT      = 5
 CRYPTO_FEE_PCT   = 3
 DEAL_PREFIX      = "ET"
