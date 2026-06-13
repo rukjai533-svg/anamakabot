@@ -695,6 +695,7 @@ def cmd_kickall(message):
 
 # ──────────────────────────────────────────────────
 #  /escrowstats — Monthly Escrow Leaderboard
+#  Shows per-escrow INR + USDT breakdown + group totals
 # ──────────────────────────────────────────────────
 
 @bot.message_handler(commands=["escrowstats"])
@@ -702,45 +703,64 @@ def cmd_escrowstats(message):
     data = load()
     now  = datetime.datetime.now()
 
-    # Current month range
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_name  = now.strftime("%B %Y")
 
-    # Build escrow leaderboard from completed deals this month
-    escrow_stats = {}  # username → {deals, volume, highest}
+    # escrow_stats[username] = {deals, inr_volume, inr_deals, crypto_volume, crypto_deals, crypto_sym}
+    escrow_stats = {}
+
+    # Group-wide totals
+    total_deals      = 0
+    total_inr        = 0.0
+    total_crypto     = 0.0
+    crypto_sym_group = "USDT"  # default
 
     for did, deal in data["deals"].items():
         if not deal.get("completed"):
             continue
 
-        # Check if completed this month
-        completed_at = deal.get("completed_at","")
+        # Only this month
         try:
-            dt = datetime.datetime.fromisoformat(completed_at)
+            dt = datetime.datetime.fromisoformat(deal.get("completed_at",""))
             if dt < month_start:
                 continue
         except:
             continue
 
-        escrow = deal.get("escrow","").lower()
+        escrow = deal.get("escrow","")
         if not escrow:
             continue
 
+        ekey   = escrow.lower()
         amount = deal.get("amount", 0)
+        ctype  = deal.get("currency_type", "INR")
         csym   = deal.get("currency_sym", "₹")
 
-        if escrow not in escrow_stats:
-            escrow_stats[escrow] = {
-                "username": deal.get("escrow",""),
-                "deals":    0,
-                "volume":   0.0,
-                "highest":  0.0,
-                "currency": csym
+        if ekey not in escrow_stats:
+            escrow_stats[ekey] = {
+                "username":    escrow,
+                "deals":       0,
+                "inr_volume":  0.0,
+                "inr_deals":   0,
+                "crypto_volume": 0.0,
+                "crypto_deals":  0,
+                "crypto_sym":  "USDT"
             }
 
-        escrow_stats[escrow]["deals"]   += 1
-        escrow_stats[escrow]["volume"]  = round(escrow_stats[escrow]["volume"] + amount, 2)
-        escrow_stats[escrow]["highest"] = max(escrow_stats[escrow]["highest"], amount)
+        escrow_stats[ekey]["deals"] += 1
+
+        if ctype == "INR":
+            escrow_stats[ekey]["inr_volume"] = round(escrow_stats[ekey]["inr_volume"] + amount, 2)
+            escrow_stats[ekey]["inr_deals"]  += 1
+            total_inr = round(total_inr + amount, 2)
+        else:
+            escrow_stats[ekey]["crypto_volume"] = round(escrow_stats[ekey]["crypto_volume"] + amount, 2)
+            escrow_stats[ekey]["crypto_deals"]  += 1
+            escrow_stats[ekey]["crypto_sym"]    = csym
+            crypto_sym_group = csym
+            total_crypto = round(total_crypto + amount, 2)
+
+        total_deals += 1
 
     if not escrow_stats:
         bot.reply_to(message,
@@ -748,26 +768,31 @@ def cmd_escrowstats(message):
             f"No completed deals this month yet.")
         return
 
-    # Sort by deals done (primary), volume (secondary)
-    ranked = sorted(escrow_stats.values(),
-                    key=lambda x: (x["deals"], x["volume"]), reverse=True)
-
+    # Sort by total deals desc
+    ranked = sorted(escrow_stats.values(), key=lambda x: x["deals"], reverse=True)
     medals = ["🥇","🥈","🥉"]
-    text   = f"🏆 Escrow Leaderboard — {month_name}\n"
-    text  += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    text  = f"🏆 Escrow Leaderboard — {month_name}\n"
+    text += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
     for i, e in enumerate(ranked, 1):
         medal = medals[i-1] if i <= 3 else f"#{i}"
-        csym  = e["currency"]
-        text += (
-            f"{medal} @{e['username']}\n"
-            f"   📦 Deals: {e['deals']}\n"
-            f"   💰 Volume: {csym}{fmt(e['volume'])}\n"
-            f"   ⚡ Highest: {csym}{fmt(e['highest'])}\n\n"
-        )
+        text += f"{medal} @{e['username']} — {e['deals']} Deal{'s' if e['deals']!=1 else ''}\n"
+
+        if e["inr_deals"] > 0:
+            text += f"   💵 INR:  ₹{fmt(e['inr_volume'])} ({e['inr_deals']} deals)\n"
+        if e["crypto_deals"] > 0:
+            text += f"   💲 {e['crypto_sym']}: {e['crypto_sym']}{fmt(e['crypto_volume'])} ({e['crypto_deals']} deals)\n"
+        text += "\n"
 
     text += "━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"📅 Stats for {month_name}"
+    text += f"📊 Group Total — {month_name}\n\n"
+    text += f"📦 Total Deals: {total_deals}\n"
+    if total_inr > 0:
+        text += f"💵 Total INR:   ₹{fmt(total_inr)}\n"
+    if total_crypto > 0:
+        text += f"💲 Total {crypto_sym_group}: {crypto_sym_group}{fmt(total_crypto)}\n"
+    text += "━━━━━━━━━━━━━━━━━━━━"
 
     bot.reply_to(message, text)
 
@@ -777,22 +802,55 @@ def cmd_escrowstats(message):
 
 @bot.message_handler(commands=["mydeal"])
 def cmd_mydeal(message):
-    caller = (message.from_user.username or message.from_user.first_name or "").lower()
+    # Auto-detect by both username AND user_id for reliability
+    caller_uname = (message.from_user.username or "").lower()
+    caller_fname = (message.from_user.first_name or "").lower()
+    caller_id    = message.from_user.id
+
     data   = load()
-    active = [
-        (did, d) for did, d in data["deals"].items()
-        if not d.get("completed") and d.get("status") != "CANCELLED"
-        and caller in [d["buyer"].lower(), d["seller"].lower(), d["escrow"].lower()]
-    ]
+    active = []
+
+    for did, d in data["deals"].items():
+        if d.get("completed") or d.get("status") == "CANCELLED":
+            continue
+
+        involved = [
+            d.get("buyer","").lower(),
+            d.get("seller","").lower(),
+            d.get("escrow","").lower()
+        ]
+
+        # Match by username or first name
+        if caller_uname and caller_uname in involved:
+            active.append((did, d))
+            continue
+        if caller_fname and caller_fname in involved:
+            active.append((did, d))
+            continue
+
+        # Also match by stored user_id (buyer_id / seller_id if saved)
+        buyer_id  = d.get("buyer_id", 0)
+        seller_id = d.get("seller_id", 0)
+        escrow_id = d.get("escrow_id", 0)
+        if caller_id and caller_id in (buyer_id, seller_id, escrow_id):
+            active.append((did, d))
+
     if not active:
-        bot.reply_to(message, "✅ You have no active deals.")
+        bot.reply_to(message, "✅ You have no active deals right now.")
         return
-    text = "📋 Your Active Deals\n" + "─"*22 + "\n"
+
+    text = f"📋 Your Active Deals ({len(active)} total)\n" + "─"*24 + "\n"
     for did, d in active:
-        csym = d.get("currency_sym","₹")
-        text += (f"\n🆔 #{did}\n"
-                 f"💰 {csym}{fmt(d['amount'])} | {d['status']}\n"
-                 f"👤 B:@{d['buyer']} | S:@{d['seller']}\n")
+        csym   = d.get("currency_sym","₹")
+        status = d.get("status","").replace("_"," ").title()
+        text += (
+            f"\n🆔 #{did}\n"
+            f"💰 {csym}{fmt(d['amount'])} | {status}\n"
+            f"👤 Buyer:  @{d.get('buyer','?')}\n"
+            f"👤 Seller: @{d.get('seller','?')}\n"
+            f"🔐 Escrow: @{d.get('escrow','?')}\n"
+        )
+
     bot.reply_to(message, text)
 
 # ──────────────────────────────────────────────────
