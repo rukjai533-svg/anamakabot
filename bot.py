@@ -12,15 +12,18 @@ import json, os, datetime, threading, time, re
 
 # ══════════════════════════════════════════════════
 BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")
-VOUCH_CHANNEL    = os.environ.get("VOUCH_CHANNEL", "@anamakatest")
+STATS_BOT_TOKEN  = os.environ.get("STATS_BOT_TOKEN", "")
+VOUCH_CHANNEL    = os.environ.get("VOUCH_CHANNEL", "@YourVouchChannel")
 INR_FEE_PCT      = 5
 CRYPTO_FEE_PCT   = 3
 DEAL_PREFIX      = "ET"
 CONFIRM_TIMEOUT  = 15 * 60
 DATA_FILE        = "escrow_data.json"
+PROMO_TAG        = "@anamakafranchise"
 # ══════════════════════════════════════════════════
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot       = telebot.TeleBot(BOT_TOKEN)
+stats_bot = telebot.TeleBot(STATS_BOT_TOKEN) if STATS_BOT_TOKEN else None
 
 # ──────────────────────────────────────────────────
 #  ADMIN CHECK
@@ -894,8 +897,111 @@ def track(message):
             save(data)
 
 # ──────────────────────────────────────────────────
-#  RUN
+#  STATS BOT — separate Telegram bot, same data file
+#  Only /stats works on this bot, everything else ignored
 # ──────────────────────────────────────────────────
 
-print(f"🤖 Escrow Bot v6 | INR: {INR_FEE_PCT}% | Crypto: {CRYPTO_FEE_PCT}%")
-bot.infinity_polling(timeout=60, long_polling_timeout=60)
+def get_stats_for_user(data, uid_key, u):
+    """Calculate INR-only stats from completed deals"""
+    uname = u.get("username","").lower()
+
+    inr_volume  = 0.0
+    highest_inr = 0.0
+    completed   = 0
+    ongoing     = 0
+
+    for did, deal in data["deals"].items():
+        involved = [
+            deal.get("buyer","").lower(),
+            deal.get("seller","").lower(),
+            deal.get("escrow","").lower()
+        ]
+        if uname not in involved:
+            continue
+
+        amount = deal.get("amount", 0)
+        ctype  = deal.get("currency_type", "INR")
+
+        if deal.get("completed"):
+            completed += 1
+            if ctype == "INR":
+                inr_volume  += amount
+                highest_inr  = max(highest_inr, amount)
+        elif deal.get("status") not in ("CANCELLED",):
+            ongoing += 1
+
+    ranked = sorted(data["users"].items(),
+                    key=lambda x: x[1].get("total_volume", 0), reverse=True)
+    rank = len(data["users"])
+    for i, (k, _) in enumerate(ranked, 1):
+        if k == uid_key:
+            rank = i
+            break
+
+    total_deals = u.get("total_deals", completed + ongoing)
+
+    return {
+        "rank":        rank,
+        "total_deals": total_deals,
+        "completed":   completed,
+        "ongoing":     ongoing,
+        "inr_volume":  round(inr_volume, 2),
+        "highest_inr": round(highest_inr, 2),
+    }
+
+
+if stats_bot:
+    @stats_bot.message_handler(commands=["stats"])
+    def stats_cmd(message):
+        parts = message.text.split()
+        data  = load()
+
+        if len(parts) > 1:
+            target = parts[1].lstrip("@")
+            uid_key, u = get_user_by_uname(data, target)
+            if not u:
+                stats_bot.reply_to(message,
+                    f"❌ No deal history found for @{target}.\n"
+                    f"They may not have participated in any deals yet.")
+                return
+        else:
+            uid_key = str(message.from_user.id)
+            if uid_key not in data["users"]:
+                stats_bot.reply_to(message, "❌ You have no deal history yet.")
+                return
+            u = data["users"][uid_key]
+
+        s = get_stats_for_user(data, uid_key, u)
+
+        text  = f"📊 Participant Stats for @{u['username']}\n\n"
+        text += f"👑 Ranking: #{s['rank']}\n"
+        text += f"🔢 Total Deals: {s['total_deals']}\n"
+        text += f"✅ Completed: {s['completed']}\n"
+        text += f"⏳ Ongoing Deals: {s['ongoing']}\n\n"
+        text += f"💵 Total Volume: ₹{fmt(s['inr_volume'])}\n"
+        text += f"⚡ Highest Deal: ₹{fmt(s['highest_inr'])}\n\n"
+        text += f"Always use {PROMO_TAG} for safer deals!"
+
+        stats_bot.reply_to(message, text)
+
+    @stats_bot.message_handler(func=lambda m: True,
+        content_types=["text","photo","video","document","sticker","audio","voice"])
+    def stats_ignore_all(message):
+        pass  # complete silence on everything except /stats
+
+# ──────────────────────────────────────────────────
+#  RUN — both bots in parallel (same process/filesystem)
+# ──────────────────────────────────────────────────
+
+def run_escrow_bot():
+    print(f"🤖 Escrow Bot v6 | INR: {INR_FEE_PCT}% | Crypto: {CRYPTO_FEE_PCT}%")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
+def run_stats_bot():
+    print("📊 Stats Bot running — only /stats works")
+    stats_bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
+if stats_bot:
+    threading.Thread(target=run_stats_bot, daemon=True).start()
+
+run_escrow_bot()
