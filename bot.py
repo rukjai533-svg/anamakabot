@@ -640,6 +640,66 @@ def cmd_escrowstats(message):
     bot.reply_to(message, text)
 
 # ──────────────────────────────────────────────────
+#  /stats — Participant stats
+# ──────────────────────────────────────────────────
+
+@bot.message_handler(commands=["stats"])
+def cmd_stats(message):
+    data = load()
+    parts = message.text.split()
+
+    if len(parts) >= 2:
+        target_uname = parts[1].lstrip("@")
+        uid_key, user = get_user_by_uname(data, target_uname)
+        if not uid_key:
+            bot.reply_to(message, f"❌ No deal history found for @{target_uname}.\nThey may not have participated in any deals yet.")
+            return
+    else:
+        caller_id = str(message.from_user.id)
+        caller_uname = message.from_user.username or ""
+        if caller_id in data["users"]:
+            uid_key = caller_id
+            user = data["users"][uid_key]
+        else:
+            uid_key, user = get_user_by_uname(data, caller_uname)
+        if not uid_key:
+            bot.reply_to(message, "❌ You have no deal history yet.")
+            return
+
+    uname = user.get("username", "Unknown")
+    total = user.get("total_deals", 0)
+    completed = user.get("completed_deals", 0)
+    ongoing = user.get("ongoing_deals", 0)
+    volume = user.get("total_volume", 0.0)
+    highest = user.get("highest_deal", 0.0)
+
+    # Ranking by completed deals
+    all_users = [(u.get("completed_deals",0), u.get("username","")) for u in data["users"].values() if u.get("total_deals",0) > 0]
+    all_users.sort(key=lambda x: -x[0])
+    rank = next((i+1 for i, (_, un) in enumerate(all_users) if un.lower() == uname.lower()), "-")
+
+    # Determine currency sym (last deal)
+    csym = "₹"
+    for did in reversed(user.get("deal_ids", [])):
+        deal = data["deals"].get(did)
+        if deal:
+            csym = deal.get("currency_sym", "₹")
+            break
+
+    text = (
+        f"Participant Stats for @{uname}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏅 Ranking: #{rank}\n"
+        f"📋 Total Deals: {total}\n"
+        f"✅ Completed: {completed}\n"
+        f"🔄 Ongoing Deals: {ongoing}\n\n"
+        f"💰 Total Volume: {csym}{fmt(volume)}\n"
+        f"⚡ Highest Deal: {csym}{fmt(highest)}\n\n"
+        f"Always use @anamakafranchise for safer deals!"
+    )
+    bot.reply_to(message, text)
+
+# ──────────────────────────────────────────────────
 #  /mydeal
 # ──────────────────────────────────────────────────
 
@@ -755,6 +815,7 @@ def cmd_help(message):
         "/deal → Create deal (Admin)\n"
         "/received → Mark received - auto detect (Admin)\n"
         "/complete → Complete + vouch - auto detect (Admin)\n"
+        "/stats → Your stats | /stats @user\n"
         "/mydeal → Active deals\n"
         "/escrowstats → Monthly leaderboard\n"
         "/kickall → Kick inactive (Admin)\n"
@@ -784,4 +845,78 @@ def track(message):
 # ──────────────────────────────────────────────────
 
 print("🤖 aNamaka CRPT Escrow Bot v8 running")
+
+# ──────────────────────────────────────────────────
+#  STATS BOT (separate token, same data file)
+# ──────────────────────────────────────────────────
+
+STATS_BOT_TOKEN = os.environ.get("STATS_BOT_TOKEN", "")
+
+if STATS_BOT_TOKEN:
+    stats_bot = telebot.TeleBot(STATS_BOT_TOKEN)
+
+    @stats_bot.message_handler(commands=["start"])
+    def sb_start(message):
+        stats_bot.reply_to(message, "aNamaka Stats Bot\nUse /stats or /stats @username")
+
+    @stats_bot.message_handler(commands=["stats"])
+    def sb_stats(message):
+        data = load()
+        parts = message.text.split()
+
+        if len(parts) >= 2:
+            target_uname = parts[1].lstrip("@")
+            uid_key, user = get_user_by_uname(data, target_uname)
+            if not uid_key:
+                stats_bot.reply_to(message, f"❌ No deal history found for @{target_uname}.\nThey may not have participated in any deals yet.")
+                return
+        else:
+            caller_id = str(message.from_user.id)
+            caller_uname = message.from_user.username or ""
+            if caller_id in data["users"]:
+                uid_key = caller_id
+                user = data["users"][uid_key]
+            else:
+                uid_key, user = get_user_by_uname(data, caller_uname)
+            if not uid_key:
+                stats_bot.reply_to(message, "❌ You have no deal history yet.")
+                return
+
+        uname = user.get("username", "Unknown")
+        total = user.get("total_deals", 0)
+        completed = user.get("completed_deals", 0)
+        ongoing = user.get("ongoing_deals", 0)
+        volume = user.get("total_volume", 0.0)
+        highest = user.get("highest_deal", 0.0)
+
+        all_users = [(u.get("completed_deals", 0), u.get("username", "")) for u in data["users"].values() if u.get("total_deals", 0) > 0]
+        all_users.sort(key=lambda x: -x[0])
+        rank = next((i + 1 for i, (_, un) in enumerate(all_users) if un.lower() == uname.lower()), "-")
+
+        csym = "₹"
+        for did in reversed(user.get("deal_ids", [])):
+            deal = data["deals"].get(did)
+            if deal:
+                csym = deal.get("currency_sym", "₹")
+                break
+
+        text = (
+            f"📊 Participant Stats for @{uname}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🏅 Ranking: #{rank}\n"
+            f"📋 Total Deals: {total}\n"
+            f"✅ Completed: {completed}\n"
+            f"🔄 Ongoing Deals: {ongoing}\n\n"
+            f"💰 Total Volume: {csym}{fmt(volume)}\n"
+            f"⚡ Highest Deal: {csym}{fmt(highest)}\n\n"
+            f"Always use @anamakafranchise for safer deals!"
+        )
+        stats_bot.reply_to(message, text)
+
+    def run_stats_bot():
+        print("📊 aNamaka Stats Bot running")
+        stats_bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
+    threading.Thread(target=run_stats_bot, daemon=True).start()
+
 bot.infinity_polling(timeout=60, long_polling_timeout=60)
