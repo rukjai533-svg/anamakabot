@@ -886,19 +886,60 @@ if STATS_BOT_TOKEN:
         total = user.get("total_deals", 0)
         completed = user.get("completed_deals", 0)
         ongoing = user.get("ongoing_deals", 0)
-        volume = user.get("total_volume", 0.0)
-        highest = user.get("highest_deal", 0.0)
 
-        all_users = [(u.get("completed_deals", 0), u.get("username", "")) for u in data["users"].values() if u.get("total_deals", 0) > 0]
+        USDT_TO_INR = 100
+
+        def user_total_inr(u):
+            total = 0.0
+            for did in u.get("deal_ids", []):
+                d = data["deals"].get(did)
+                if not d:
+                    continue
+                amt = d.get("amount", 0.0)
+                if d.get("currency_type", "INR") == "INR":
+                    total += amt
+                else:
+                    total += amt * USDT_TO_INR
+            return total
+
+        all_users = [(user_total_inr(u), u.get("username", "")) for u in data["users"].values() if u.get("total_deals", 0) > 0]
         all_users.sort(key=lambda x: -x[0])
         rank = next((i + 1 for i, (_, un) in enumerate(all_users) if un.lower() == uname.lower()), "-")
 
-        csym = "₹"
-        for did in reversed(user.get("deal_ids", [])):
+        inr_volume = 0.0
+        inr_highest = 0.0
+        crypto_volumes = {}
+        crypto_highest = {}
+
+        for did in user.get("deal_ids", []):
             deal = data["deals"].get(did)
-            if deal:
-                csym = deal.get("currency_sym", "₹")
-                break
+            if not deal:
+                continue
+            amount = deal.get("amount", 0.0)
+            ctype = deal.get("currency_type", "INR")
+            csym = deal.get("currency_sym", "₹")
+            if ctype == "INR":
+                inr_volume += amount
+                if amount > inr_highest:
+                    inr_highest = amount
+            else:
+                crypto_volumes[csym] = round(crypto_volumes.get(csym, 0.0) + amount, 2)
+                if amount > crypto_highest.get(csym, 0.0):
+                    crypto_highest[csym] = amount
+
+        vol_parts = []
+        if inr_volume > 0:
+            vol_parts.append(f"₹{fmt(inr_volume)}")
+        for sym, vol in crypto_volumes.items():
+            vol_parts.append(f"${fmt(vol)}" if sym in ("USDT","USDC","USD") else f"{sym} {fmt(vol)}")
+        volume_str = " , ".join(vol_parts) if vol_parts else "₹0"
+
+        high_parts = []
+        if inr_highest > 0:
+            high_parts.append(f"₹{fmt(inr_highest)}")
+        for sym, high in crypto_highest.items():
+            high_parts.append(f"${fmt(high)}" if sym in ("USDT","USDC","USD") else f"{sym} {fmt(high)}")
+        highest_str = " , ".join(high_parts) if high_parts else "₹0"
 
         text = (
             f"📊 Participant Stats for @{uname}\n"
@@ -907,8 +948,8 @@ if STATS_BOT_TOKEN:
             f"📋 Total Deals: {total}\n"
             f"✅ Completed: {completed}\n"
             f"🔄 Ongoing Deals: {ongoing}\n\n"
-            f"💰 Total Volume: {csym}{fmt(volume)}\n"
-            f"⚡ Highest Deal: {csym}{fmt(highest)}\n\n"
+            f"💰 Total Volume: {volume_str}\n"
+            f"⚡️ Highest Deal: {highest_str}\n\n"
             f"Always use @anamakafranchise for safer deals!"
         )
         stats_bot.reply_to(message, text)
