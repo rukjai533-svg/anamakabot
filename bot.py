@@ -236,9 +236,9 @@ def parse_form(text):
         if not val:
             continue
         if "buyer" in key:
-            result["buyer"] = val.lstrip("@").split()[0].strip(".,")
+            result["buyer"] = re.sub(r'^[@\s]+', '', val).split()[0].strip(".,") if val.strip() else ""
         elif "seller" in key:
-            result["seller"] = val.lstrip("@").split()[0].strip(".,")
+            result["seller"] = re.sub(r'^[@\s]+', '', val).split()[0].strip(".,") if val.strip() else ""
         elif any(w in key for w in ["time","complete","timeframe"]):
             result["timeframe"] = val
         elif "amount" in key:
@@ -889,6 +889,8 @@ if STATS_BOT_TOKEN:
 
         USDT_TO_INR = 100
 
+        CRYPTO_SYMS = ("USDT", "USDC", "BTC", "ETH", "BNB", "SOL")
+
         def user_total_inr(u):
             total = 0.0
             for did in u.get("deal_ids", []):
@@ -896,10 +898,12 @@ if STATS_BOT_TOKEN:
                 if not d:
                     continue
                 amt = d.get("amount", 0.0)
-                if d.get("currency_type", "INR") == "INR":
-                    total += amt
-                else:
+                csym = d.get("currency_sym", "₹")
+                ctype = d.get("currency_type", "")
+                if ctype == "CRYPTO" or csym in CRYPTO_SYMS:
                     total += amt * USDT_TO_INR
+                else:
+                    total += amt
             return total
 
         all_users = [(user_total_inr(u), u.get("username", "")) for u in data["users"].values() if u.get("total_deals", 0) > 0]
@@ -910,22 +914,24 @@ if STATS_BOT_TOKEN:
         inr_highest = 0.0
         crypto_volumes = {}
         crypto_highest = {}
+        CRYPTO_SYMS = ("USDT", "USDC", "BTC", "ETH", "BNB", "SOL")
 
         for did in user.get("deal_ids", []):
             deal = data["deals"].get(did)
             if not deal:
                 continue
             amount = deal.get("amount", 0.0)
-            ctype = deal.get("currency_type", "INR")
             csym = deal.get("currency_sym", "₹")
-            if ctype == "INR":
-                inr_volume += amount
-                if amount > inr_highest:
-                    inr_highest = amount
-            else:
+            ctype = deal.get("currency_type", "")
+            # Treat as crypto if currency_type is CRYPTO or sym is a known crypto
+            if ctype == "CRYPTO" or csym in CRYPTO_SYMS:
                 crypto_volumes[csym] = round(crypto_volumes.get(csym, 0.0) + amount, 2)
                 if amount > crypto_highest.get(csym, 0.0):
                     crypto_highest[csym] = amount
+            else:
+                inr_volume += amount
+                if amount > inr_highest:
+                    inr_highest = amount
 
         vol_parts = []
         if inr_volume > 0:
