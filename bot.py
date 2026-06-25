@@ -243,13 +243,21 @@ def parse_form(text):
             result["timeframe"] = val
         elif "amount" in key:
             result["amount_raw"] = val
-            clean = re.sub(r"[₹$€£\s/]", " ", val)
-            m = re.search(r"[\d,]+\.?\d*", clean)
-            if m:
+            clean = re.sub(r"[₹$€£\s/+]", " ", val).strip()
+            # Handle shorthand: 2k/2K = 2000, 1.5k = 1500
+            km = re.search(r"([\d,]+\.?\d*)\s*[kK]", clean)
+            if km:
                 try:
-                    result["amount"] = float(m.group(0).replace(",",""))
+                    result["amount"] = float(km.group(1).replace(",","")) * 1000
                 except:
                     result["amount"] = 0.0
+            else:
+                m = re.search(r"[\d,]+\.?\d*", clean)
+                if m:
+                    try:
+                        result["amount"] = float(m.group(0).replace(",",""))
+                    except:
+                        result["amount"] = 0.0
         elif any(w in key for w in ["network","payment","mode"]):
             result["network"] = val
     return result
@@ -327,10 +335,10 @@ def cmd_deal(message):
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("Seller ✅", callback_data=f"cs_{deal_id}"),
-        types.InlineKeyboardButton("Buyer ✅", callback_data=f"cb_{deal_id}")
+        types.InlineKeyboardButton("Seller Confirm ✅", callback_data=f"cs_{deal_id}"),
+        types.InlineKeyboardButton("Buyer Confirm ✅", callback_data=f"cb_{deal_id}")
     )
-    markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data=f"cx_{deal_id}"))
+    markup.add(types.InlineKeyboardButton("❌ Cancel Deal", callback_data=f"cx_{deal_id}"))
 
     sent = bot.send_message(message.chat.id, card, reply_markup=markup)
     pending[deal_id]["msg_id"] = sent.message_id
@@ -670,34 +678,132 @@ def cmd_stats(message):
     total = user.get("total_deals", 0)
     completed = user.get("completed_deals", 0)
     ongoing = user.get("ongoing_deals", 0)
-    volume = user.get("total_volume", 0.0)
-    highest = user.get("highest_deal", 0.0)
 
-    # Ranking by completed deals
-    all_users = [(u.get("completed_deals",0), u.get("username","")) for u in data["users"].values() if u.get("total_deals",0) > 0]
+    USDT_TO_INR = 100
+    CRYPTO_SYMS = ("USDT", "USDC", "BTC", "ETH", "BNB", "SOL")
+
+    def user_total_inr(u):
+        t = 0.0
+        for did in u.get("deal_ids", []):
+            d = data["deals"].get(did)
+            if not d:
+                continue
+            amt = d.get("amount", 0.0)
+            csym_ = d.get("currency_sym", "₹")
+            ctype_ = d.get("currency_type", "")
+            if ctype_ == "CRYPTO" or csym_ in CRYPTO_SYMS:
+                t += amt * USDT_TO_INR
+            else:
+                t += amt
+        return t
+
+    all_users = [(user_total_inr(u), u.get("username", "")) for u in data["users"].values() if u.get("total_deals", 0) > 0]
     all_users.sort(key=lambda x: -x[0])
-    rank = next((i+1 for i, (_, un) in enumerate(all_users) if un.lower() == uname.lower()), "-")
+    rank = next((i + 1 for i, (_, un) in enumerate(all_users) if un.lower() == uname.lower()), "-")
 
-    # Determine currency sym (last deal)
-    csym = "₹"
-    for did in reversed(user.get("deal_ids", [])):
+    inr_volume = 0.0
+    inr_highest = 0.0
+    crypto_volumes = {}
+    crypto_highest = {}
+
+    for did in user.get("deal_ids", []):
         deal = data["deals"].get(did)
-        if deal:
-            csym = deal.get("currency_sym", "₹")
-            break
+        if not deal:
+            continue
+        amount = deal.get("amount", 0.0)
+        csym = deal.get("currency_sym", "₹")
+        ctype = deal.get("currency_type", "")
+        if ctype == "CRYPTO" or csym in CRYPTO_SYMS:
+            crypto_volumes[csym] = round(crypto_volumes.get(csym, 0.0) + amount, 2)
+            if amount > crypto_highest.get(csym, 0.0):
+                crypto_highest[csym] = amount
+        else:
+            inr_volume += amount
+            if amount > inr_highest:
+                inr_highest = amount
+
+    vol_parts = []
+    if inr_volume > 0:
+        vol_parts.append(f"₹{fmt(inr_volume)}")
+    for sym, vol in crypto_volumes.items():
+        vol_parts.append(f"${fmt(vol)}" if sym in ("USDT","USDC","USD") else f"{sym} {fmt(vol)}")
+    volume_str = " , ".join(vol_parts) if vol_parts else "₹0"
+
+    high_parts = []
+    if inr_highest > 0:
+        high_parts.append(f"₹{fmt(inr_highest)}")
+    for sym, high in crypto_highest.items():
+        high_parts.append(f"${fmt(high)}" if sym in ("USDT","USDC","USD") else f"{sym} {fmt(high)}")
+    highest_str = " , ".join(high_parts) if high_parts else "₹0"
 
     text = (
-        f"Participant Stats for @{uname}\n"
+        f"📊 Participant Stats for @{uname}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🏅 Ranking: #{rank}\n"
         f"📋 Total Deals: {total}\n"
         f"✅ Completed: {completed}\n"
         f"🔄 Ongoing Deals: {ongoing}\n\n"
-        f"💰 Total Volume: {csym}{fmt(volume)}\n"
-        f"⚡ Highest Deal: {csym}{fmt(highest)}\n\n"
+        f"💰 Total Volume: {volume_str}\n"
+        f"⚡️ Highest Deal: {highest_str}\n\n"
         f"Always use @anamakafranchise for safer deals!"
     )
     bot.reply_to(message, text)
+
+# ──────────────────────────────────────────────────
+#  /cancel — Cancel an active deal
+# ──────────────────────────────────────────────────
+
+@bot.message_handler(commands=["cancel"])
+def cmd_cancel(message):
+    data = load()
+    parts = message.text.split()
+    caller_id = message.from_user.id
+    caller_u = (message.from_user.username or "").lower()
+
+    if len(parts) < 2:
+        bot.reply_to(message, "Usage: /cancel #ET000001")
+        return
+
+    deal_id = parts[1].strip().upper()
+    if not deal_id.startswith("#"):
+        deal_id = "#" + deal_id
+
+    deal = data["deals"].get(deal_id)
+    if not deal:
+        bot.reply_to(message, f"❌ Deal {deal_id} not found.")
+        return
+    if deal.get("completed") or deal.get("status") == "CANCELLED":
+        bot.reply_to(message, f"❌ Deal {deal_id} is already closed.")
+        return
+
+    # Only escrow or admin can cancel
+    is_escrow = deal.get("escrow","").lower() == caller_u or deal.get("escrow_id") == caller_id
+    if not is_escrow and not is_admin(message.chat.id, caller_id):
+        bot.reply_to(message, "❌ Only the escrower or an admin can cancel this deal.")
+        return
+
+    # Rollback user stats
+    for uname, role in [(deal.get("buyer",""), "buyer"), (deal.get("seller",""), "seller")]:
+        uk, u = get_user_by_uname(data, uname)
+        if u:
+            u["total_deals"] = max(0, u.get("total_deals",1) - 1)
+            u["ongoing_deals"] = max(0, u.get("ongoing_deals",1) - 1)
+            if deal_id in u.get("deal_ids", []):
+                u["deal_ids"].remove(deal_id)
+
+    ek, eu = get_user_by_uname(data, deal.get("escrow",""))
+    if eu:
+        eu["total_deals"] = max(0, eu.get("total_deals",1) - 1)
+        eu["ongoing_deals"] = max(0, eu.get("ongoing_deals",1) - 1)
+        if deal_id in eu.get("deal_ids", []):
+            eu["deal_ids"].remove(deal_id)
+
+    deal["status"] = "CANCELLED"
+    deal["cancelled_at"] = dt.now().isoformat()
+    deal["cancelled_by"] = caller_u
+    save(data)
+
+    bot.reply_to(message, f"❌ Deal {deal_id} has been cancelled by @{caller_u}.")
 
 # ──────────────────────────────────────────────────
 #  /mydeal
@@ -829,6 +935,27 @@ def cmd_help(message):
 #  PASSIVE TRACKER
 # ──────────────────────────────────────────────────
 
+@bot.message_handler(content_types=["new_chat_members"])
+def track_new_members(message):
+    """Track every user who joins the group."""
+    data = load()
+    changed = False
+    for user in message.new_chat_members:
+        if user.is_bot:
+            continue
+        uname = user.username or ""
+        uid_key = str(user.id)
+        if uid_key not in data["users"]:
+            ensure_user(data, uname, user.id)
+            changed = True
+        else:
+            # Update username in case it changed
+            if uname:
+                data["users"][uid_key]["username"] = uname
+            changed = True
+    if changed:
+        save(data)
+
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def track(message):
     if not message.from_user or not message.from_user.username:
@@ -839,6 +966,11 @@ def track(message):
     if uid_key not in data["users"]:
         ensure_user(data, uname, message.from_user.id)
         save(data)
+    else:
+        # Keep username fresh
+        if data["users"][uid_key].get("username") != uname:
+            data["users"][uid_key]["username"] = uname
+            save(data)
 
 # ──────────────────────────────────────────────────
 #  RUN
@@ -857,7 +989,18 @@ if STATS_BOT_TOKEN:
 
     @stats_bot.message_handler(commands=["start"])
     def sb_start(message):
-        stats_bot.reply_to(message, "aNamaka Stats Bot\nUse /stats or /stats @username")
+        data = load()
+        deals_count = len(data.get("deals", {}))
+        users_count = len(data.get("users", {}))
+        import os as _os
+        file_exists = _os.path.exists(DATA_FILE)
+        stats_bot.reply_to(message,
+            f"aNamaka Stats Bot\n"
+            f"Use /stats or /stats @username\n\n"
+            f"[Debug] File: {DATA_FILE}\n"
+            f"File exists: {file_exists}\n"
+            f"Deals: {deals_count} | Users: {users_count}"
+        )
 
     @stats_bot.message_handler(commands=["stats"])
     def sb_stats(message):
@@ -873,13 +1016,23 @@ if STATS_BOT_TOKEN:
         else:
             caller_id = str(message.from_user.id)
             caller_uname = message.from_user.username or ""
+            # Try by user_id first
             if caller_id in data["users"]:
                 uid_key = caller_id
                 user = data["users"][uid_key]
             else:
+                # Try by username
                 uid_key, user = get_user_by_uname(data, caller_uname)
+            # Last resort: search all users for matching user_id int
             if not uid_key:
-                stats_bot.reply_to(message, "❌ You have no deal history yet.")
+                caller_id_int = message.from_user.id
+                for k, u in data["users"].items():
+                    if u.get("user_id") == caller_id_int:
+                        uid_key = k
+                        user = u
+                        break
+            if not uid_key:
+                stats_bot.reply_to(message, "❌ You have no deal history yet. Participate in a deal first.")
                 return
 
         uname = user.get("username", "Unknown")
